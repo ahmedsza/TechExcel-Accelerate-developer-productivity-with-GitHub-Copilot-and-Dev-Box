@@ -8,37 +8,56 @@ var webAppName = '${uniqueString(resourceGroup().id)}-${environment}'
 var appServicePlanName = '${uniqueString(resourceGroup().id)}-mpnp-asp'
 var logAnalyticsName = '${uniqueString(resourceGroup().id)}-mpnp-la'
 var appInsightsName = '${uniqueString(resourceGroup().id)}-mpnp-ai'
-var sku = 'S1'
+var sku = 'P0V3'
 var registryName = '${uniqueString(resourceGroup().id)}mpnpreg'
 var registrySku = 'Standard'
 var imageName = 'techexcel/dotnetcoreapp'
 var startupCommand = ''
+var redisCacheName = '${uniqueString(resourceGroup().id)}-mpnp-redis'
+var redisCacheSku = 'Basic'
 
-// Create Log Analytics Workspace
-resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2021-06-01' = {
+resource redisCache 'Microsoft.Cache/Redis@2023-08-01' = {
+  name: redisCacheName
+  location: location
+  properties: {
+    sku: {
+      name: redisCacheSku
+      family: 'C'
+      capacity: 0
+    }
+    enableNonSslPort: false
+    minimumTlsVersion: '1.2'
+    redisConfiguration: {
+      'maxmemory-policy': 'volatile-lru'
+    }
+  }
+}
+
+resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2021-12-01-preview' = {
   name: logAnalyticsName
   location: location
   properties: {
     sku: {
       name: 'PerGB2018'
     }
-    retentionInDays: 30
+    retentionInDays: 90
+    workspaceCapping: {
+      dailyQuotaGb: 1
+    }
   }
 }
 
-// Create Application Insights
-resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
+resource appInsights 'Microsoft.Insights/components@2020-02-02-preview' = {
   name: appInsightsName
   location: location
   kind: 'web'
   properties: {
     Application_Type: 'web'
-    WorkspaceResourceId: logAnalytics.id
+    WorkspaceResourceId: logAnalyticsWorkspace.id
   }
 }
 
-// Create Azure Container Registry
-resource containerRegistry 'Microsoft.ContainerRegistry/registries@2021-06-01-preview' = {
+resource containerRegistry 'Microsoft.ContainerRegistry/registries@2020-11-01-preview' = {
   name: registryName
   location: location
   sku: {
@@ -49,62 +68,56 @@ resource containerRegistry 'Microsoft.ContainerRegistry/registries@2021-06-01-pr
   }
 }
 
-// Create App Service Plan
-resource appServicePlan 'Microsoft.Web/serverfarms@2021-02-01' = {
+resource appServicePlan 'Microsoft.Web/serverFarms@2022-09-01' = {
   name: appServicePlanName
   location: location
+  kind: 'linux'
+  properties: {
+    reserved: true
+  }
   sku: {
     name: sku
-    tier: 'Standard'
-  }
-  properties: {
-    reserved: true // This property is required for Linux
   }
 }
 
-// Create Web App
-resource webApp 'Microsoft.Web/sites@2021-02-01' = {
+resource appServiceApp 'Microsoft.Web/sites@2020-12-01' = {
   name: webAppName
   location: location
   properties: {
     serverFarmId: appServicePlan.id
+    httpsOnly: true
+    clientAffinityEnabled: false
     siteConfig: {
-      linuxFxVersion: 'DOCKER|${imageName}'
+      linuxFxVersion: 'DOCKER|${containerRegistry.name}.azurecr.io/${uniqueString(resourceGroup().id)}/${imageName}'
+      http20Enabled: true
+      minTlsVersion: '1.2'
+      appCommandLine: startupCommand
       appSettings: [
-        {
-          name: 'DOCKER_REGISTRY_SERVER_URL'
-          value: 'https://${registryName}.azurecr.io'
-        }
-        {
-          name: 'DOCKER_REGISTRY_SERVER_USERNAME'
-          value: containerRegistry.properties.adminUserEnabled ? listCredentials(containerRegistry.id, '2021-06-01-preview').username : ''
-        }
-        {
-          name: 'DOCKER_REGISTRY_SERVER_PASSWORD'
-          value: containerRegistry.properties.adminUserEnabled ? listCredentials(containerRegistry.id, '2021-06-01-preview').passwords[0].value : ''
-        }
-        {
-          name: 'APPINSIGHTS_INSTRUMENTATIONKEY'
-          value: appInsights.properties.InstrumentationKey
-        }
-        {
-          name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
-          value: appInsights.properties.ConnectionString
-        }
         {
           name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE'
           value: 'false'
         }
         {
-          name: 'WEBSITES_PORT'
-          value: '80' // Default port for your application
+          name: 'DOCKER_REGISTRY_SERVER_URL'
+          value: 'https://${containerRegistry.name}.azurecr.io'
         }
-      ]
+        {
+          name: 'DOCKER_REGISTRY_SERVER_USERNAME'
+          value: containerRegistry.name
+        }
+        {
+          name: 'DOCKER_REGISTRY_SERVER_PASSWORD'
+          value: containerRegistry.listCredentials().passwords[0].value
+        }
+        {
+          name: 'APPINSIGHTS_INSTRUMENTATIONKEY'
+          value: appInsights.properties.InstrumentationKey
+        }
+        ]
+      }
     }
-  }
 }
 
-// Outputs
-output appServiceName string = webApp.name
-output appServiceUrl string = 'https://${webAppName}.azurewebsites.net'
-output containerRegistryName string = containerRegistry.name
+output application_name string = appServiceApp.name
+output application_url string = appServiceApp.properties.hostNames[0]
+output container_registry_name string = containerRegistry.name
